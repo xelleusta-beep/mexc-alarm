@@ -1,0 +1,46 @@
+name: MEXC Alarm Kontrol
+
+on:
+  schedule:
+    # Her 15 dakikada bir UTC - 1G mumlar icin 00:05 civari, 1S mumlar icin yeterli
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check-alarms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Repo'yu cek
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Bagliliklari kur
+        run: |
+          pip install --no-cache-dir pandas numpy scikit-learn ccxt requests
+
+      - name: Alarm kontrolu calistir
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python alarms_daemon.py --once
+
+      - name: Konfig guncellemesini kaydet
+        run: |
+          git config user.name "alarm-bot"
+          git config user.email "alarm-bot@users.noreply.github.com"
+          git add alarm_config.json
+          if git diff --cached --quiet; then
+            echo "Degisiklik yok"
+          else
+            git commit -m "Alarm durumu guncellendi [skip ci]"
+            git push
+          fi

@@ -1,0 +1,8 @@
+{
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
+  "leverage": 1,
+  "train_ratio": 80,
+  "check_interval_sec": 30,
+  "alarms": []
+}

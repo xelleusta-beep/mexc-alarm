@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+.streamlit/
+backtest_sonuclari.xlsx
+.DS_Store
