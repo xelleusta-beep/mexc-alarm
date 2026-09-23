@@ -41,5 +41,13 @@ jobs:
             echo "Degisiklik yok"
           else
             git commit -m "Alarm durumu guncellendi [skip ci]"
-            git push
+            for i in 1 2 3 4 5; do
+              git pull --rebase origin main
+              if git push origin main; then
+                echo "Push basarili"
+                break
+              fi
+              echo "Push basarisiz, yeniden deneniyor ($i/5)..."
+              sleep $((i * 2))
+            done
           fi
