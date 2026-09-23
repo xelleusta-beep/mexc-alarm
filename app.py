@@ -382,7 +382,7 @@ st.sidebar.header("🔍 2. Kripto Seçimi & Backtest Ayarları")
 
 crypto_list = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
-    "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "MATIC/USDT",
+    "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "ZEC/USDT",
     "DOGE/USDT", "SHIB/USDT", "NEAR/USDT", "SUI/USDT", "LTC/USDT"
 ]
 
