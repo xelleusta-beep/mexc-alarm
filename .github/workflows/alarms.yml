@@ -5,6 +5,15 @@ on:
     # Her 15 dakikada bir UTC - 1G mumlar icin 00:05 civari, 1S mumlar icin yeterli
     - cron: "*/15 * * * *"
   workflow_dispatch:
+    inputs:
+      test:
+        description: "Telegram test mesaji gonder"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   check-alarms:
@@ -22,17 +31,50 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Telegram test
+        if: inputs.test == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os, requests, datetime
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+          if not token or not chat:
+              print("SECRET YOK: TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID bos")
+              raise SystemExit(1)
+          now = datetime.datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+          msg = (
+              f"✅ *TEST BASARILI*\n"
+              f"━━━━━━━━━━━━━━━\n"
+              f"🤖 GitHub Actions calisiyor\n"
+              f"📅 {now}\n"
+              f"⚡ Kaldi\u017fac: 10x | 15 coin | 1G"
+          )
+          r = requests.post(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              json={"chat_id": chat, "text": msg, "parse_mode": "Markdown"},
+              timeout=15,
+          )
+          print("HTTP", r.status_code, r.text)
+          r.raise_for_status()
+          PY
+
       - name: Bagliliklari kur
+        if: inputs.test != 'true'
         run: |
           pip install pandas numpy scikit-learn ccxt requests
 
       - name: Alarm kontrolu calistir
+        if: inputs.test != 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python alarms_daemon.py --once
 
       - name: Konfig guncellemesini kaydet
+        if: inputs.test != 'true'
         run: |
           git config user.name "alarm-bot"
           git config user.email "alarm-bot@users.noreply.github.com"
