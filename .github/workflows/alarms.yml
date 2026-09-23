@@ -37,29 +37,16 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python - <<'PY'
-          import os, requests, datetime
-          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-          chat = os.environ.get("TELEGRAM_CHAT_ID", "")
-          if not token or not chat:
-              print("SECRET YOK: TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID bos")
-              raise SystemExit(1)
-          now = datetime.datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
-          msg = (
-              f"✅ *TEST BASARILI*\n"
-              f"━━━━━━━━━━━━━━━\n"
-              f"🤖 GitHub Actions calisiyor\n"
-              f"📅 {now}\n"
-              f"⚡ Kaldi\u017fac: 10x | 15 coin | 1G"
-          )
-          r = requests.post(
-              f"https://api.telegram.org/bot{token}/sendMessage",
-              json={"chat_id": chat, "text": msg, "parse_mode": "Markdown"},
-              timeout=15,
-          )
-          print("HTTP", r.status_code, r.text)
-          r.raise_for_status()
-          PY
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "SECRET YOK"
+            exit 1
+          fi
+          NOW=$(date -u +"%d.%m.%Y %H:%M UTC")
+          MSG="✅ *TEST BASARILI*%0A━━━━━━━━━━━━━━━%0A🤖 GitHub Actions calisiyor%0A📅 ${NOW}%0AKaldirac: 10x | 15 coin | 1G"
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": \"${TELEGRAM_CHAT_ID}\", \"text\": \"${MSG}\", \"parse_mode\": \"Markdown\"}"
+          echo ""
 
       - name: Bagliliklari kur
         if: inputs.test != 'true'
