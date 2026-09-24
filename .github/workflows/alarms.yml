@@ -2,7 +2,9 @@ name: MEXC Alarm Kontrol
 
 on:
   schedule:
-    # Her 15 dakikada bir UTC - 1G mumlar icin 00:05 civari, 1S mumlar icin yeterli
+    # GUN KAPANISI (00:00 UTC = 03:00 TR) -> 00:01-00:12 arasi HER DK
+    - cron: "1-12 0 * * *"
+    # Geri kalan sure: her 15 dk
     - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
