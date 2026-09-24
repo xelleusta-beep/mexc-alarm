@@ -4,3 +4,5 @@ __pycache__/
 .streamlit/
 backtest_sonuclari.xlsx
 .DS_Store
+daemon.log
+daemon.err

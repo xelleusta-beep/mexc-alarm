@@ -44,7 +44,7 @@ jobs:
             exit 1
           fi
           NOW=$(date -u +"%d.%m.%Y %H:%M UTC")
-          MSG="✅ *TEST BASARILI*%0A━━━━━━━━━━━━━━━%0A🤖 GitHub Actions calisiyor%0A📅 ${NOW}%0AKaldirac: 10x | 15 coin | 1G"
+          MSG="✅ *TEST BASARILI*%0A━━━━━━━━━━━━━━━%0A🤖 GitHub Actions calisiyor%0A📅 ${NOW}%0AKaldirac: 10x | 20 coin | 1G | 2Y"
           curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -H "Content-Type: application/json" \
             -d "{\"chat_id\": \"${TELEGRAM_CHAT_ID}\", \"text\": \"${MSG}\", \"parse_mode\": \"Markdown\"}"

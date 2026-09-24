@@ -140,7 +140,7 @@ def candle_closed(last_ts, interval):
 
 def period_candles_for(interval, period="1y"):
     unit_factor = {
-        "7d": 7, "30d": 30, "2mo": 60, "1y": 365, "3y": 1095,
+        "7d": 7, "30d": 30, "2mo": 60, "1y": 365, "2y": 730, "3y": 1095,
     }
     days = unit_factor.get(period, 365)
     per = 24 if interval == "1h" else 1

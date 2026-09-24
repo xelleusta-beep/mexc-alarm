@@ -88,7 +88,7 @@ def get_crypto_data(symbol_name, safe_limit, inv_str):
         return pd.DataFrame()
 
 # --- 3. PANDAS BACKTEST MATEMATİK MOTORU (Walk-Forward) ---
-def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_forward=True, leverage=1):
+def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_forward=True, leverage=1, trade_margin=None):
     try:
         from sklearn.ensemble import RandomForestClassifier
         working_df = df_input.copy()
@@ -164,9 +164,11 @@ def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_
         ent_price = 0.0
         ent_date = None
         cash = init_cash
+        margin_size = float(trade_margin) if trade_margin and trade_margin > 0 else cash
         units = 0.0
         pos_low = float('inf')
         trade_cash_in = 0.0
+        cash_at_entry = 0.0
         start_idx = min_train if walk_forward else min_train
 
         for i in range(start_idx, len(working_df)):
@@ -175,28 +177,62 @@ def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_
             c_low = float(working_df['Low'].iloc[i])
             c_sig = int(working_df['Predicted_Signal'].iloc[i])
 
-            if c_sig == 1 and not in_pos:
-                trade_cash_in = cash
-                units = (cash / c_price) * 0.9998
+            if c_sig == 1 and not in_pos and cash > 0.01 and margin_size > 0.01:
+                trade_cash_in = min(margin_size, cash)
+                cash_at_entry = cash
+                units = (trade_cash_in / c_price) * 0.9998
                 ent_price = c_price
                 ent_date = c_date
-                cash = 0.0
                 in_pos = True
                 pos_low = c_low
-            elif in_pos:
+
+            if in_pos:
                 if c_low < pos_low:
                     pos_low = c_low
+                if trade_cash_in > 0 and leverage > 0:
+                    liq_drop = cash_at_entry / (trade_cash_in * leverage)
+                    liq_price = ent_price * (1.0 - liq_drop) if liq_drop < 1.0 else 0.0
+                    if liq_drop < 1.0 and pos_low <= liq_price:
+                        cash = 0.0
+                        ret_pct = ((liq_price - ent_price) / ent_price) * 100
+                        max_dd_pct = ((pos_low - ent_price) / ent_price) * 100
+                        max_dd_lev_pct = max_dd_pct * leverage
+                        trade_size = trade_cash_in
+                        max_dd_usd = (max_dd_pct / 100.0) * trade_size * leverage
+                        trade_logs.append({
+                            "İşlem ID": len(trade_logs) + 1,
+                            "Yön": "🟢 AL → 💥 LİQ",
+                            "Giriş Tarihi": ent_date.strftime('%Y-%m-%d %H:%M'),
+                            "Çıkış Tarihi": c_date.strftime('%Y-%m-%d %H:%M'),
+                            "Giriş Fiyatı ($)": round(ent_price, 4),
+                            "Çıkış Fiyatı ($)": round(liq_price, 4),
+                            "Toplam Kasa ($)": 0.0,
+                            "Miktar ($)": f"+${trade_size:.2f}",
+                            "Net Kâr/Zarar ($)": round(-cash_at_entry, 2),
+                            "Getiri (%)": f"{ret_pct * leverage:.2f}%",
+                            "Max Düşüş (%)": f"{max_dd_pct:.2f}%",
+                            "Max Düşüş (Kaldıraçlı %)": f"{max_dd_lev_pct:.2f}%",
+                            "Max Düşüş ($)": round(max_dd_usd, 2),
+                            "Sonuç": "💥 Likide"
+                        })
+                        units = 0.0
+                        in_pos = False
+                        pos_low = float('inf')
+                        margin_size = 0.0
+                        continue
 
             if c_sig == 0 and in_pos:
                 cash_raw = (units * c_price) * 0.9998
                 pnl_raw = cash_raw - trade_cash_in
                 pnl = pnl_raw * leverage
-                cash = max(trade_cash_in + pnl, 0.0)
+                cash = max(cash_at_entry + pnl, 0.0)
+                margin_size = max(margin_size + pnl, 0.0)
                 ret_pct = ((c_price - ent_price) / ent_price) * 100
                 max_dd_pct = ((pos_low - ent_price) / ent_price) * 100
                 max_dd_lev_pct = max_dd_pct * leverage
-                trade_size = units * ent_price
+                trade_size = trade_cash_in
                 max_dd_usd = (max_dd_pct / 100.0) * trade_size * leverage
+                is_liq = cash <= 0.0 and pnl < 0
                 trade_logs.append({
                     "İşlem ID": len(trade_logs) + 1,
                     "Yön": "🟢 AL → 🔴 SAT",
@@ -204,22 +240,25 @@ def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_
                     "Çıkış Tarihi": c_date.strftime('%Y-%m-%d %H:%M'),
                     "Giriş Fiyatı ($)": round(ent_price, 4),
                     "Çıkış Fiyatı ($)": round(c_price, 4),
+                    "Toplam Kasa ($)": round(cash, 2),
                     "Miktar ($)": f"+${trade_size:.2f}",
                     "Net Kâr/Zarar ($)": round(pnl, 2),
                     "Getiri (%)": f"{ret_pct * leverage:.2f}%",
                     "Max Düşüş (%)": f"{max_dd_pct:.2f}%",
                     "Max Düşüş (Kaldıraçlı %)": f"{max_dd_lev_pct:.2f}%",
                     "Max Düşüş ($)": round(max_dd_usd, 2),
-                    "Sonuç": "✅ Başarılı" if ret_pct > 0 else "❌ Başarısız"
+                    "Sonuç": "💥 Likide" if is_liq else ("✅ Başarılı" if ret_pct > 0 else "❌ Başarısız")
                 })
                 units = 0.0
                 in_pos = False
                 pos_low = float('inf')
+                if is_liq:
+                    margin_size = 0.0
 
         c_last_price = float(working_df['Close'].iloc[-1])
         if in_pos:
             unreal_raw = (units * c_last_price) * 0.9998 - trade_cash_in
-            final_val = max(trade_cash_in + unreal_raw * leverage, 0.0)
+            final_val = max(cash_at_entry + unreal_raw * leverage, 0.0)
         else:
             final_val = cash
         total_ret_pct = ((final_val - init_cash) / init_cash) * 100
@@ -383,7 +422,8 @@ st.sidebar.header("🔍 2. Kripto Seçimi & Backtest Ayarları")
 crypto_list = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
     "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "ZEC/USDT",
-    "DOGE/USDT", "SHIB/USDT", "NEAR/USDT", "SUI/USDT", "LTC/USDT"
+    "DOGE/USDT", "SHIB/USDT", "NEAR/USDT", "SUI/USDT", "LTC/USDT",
+    "TRX/USDT", "ONE/USDT", "ONDO/USDT", "MUBARAK/USDT", "BROCCOLI/USDT"
 ]
 
 if "custom_cryptos" not in st.session_state:
@@ -419,7 +459,7 @@ if custom_input:
     elif normalized in crypto_list or normalized in st.session_state.custom_cryptos:
         st.sidebar.info(f"ℹ️ {normalized} zaten listede")
 
-interval_label = st.sidebar.selectbox("Veri Sıklığı (Grafik Mum Tipi)", ["1 Saat", "1 Gün"])
+interval_label = st.sidebar.selectbox("Veri Sıklığı (Grafik Mum Tipi)", ["1 Saat", "1 Gün"], index=1)
 
 interval_mapping = {"1 Saat": "1h", "1 Gün": "1d"}
 period_mapping = {"7 Gün": "7d", "30 Gün": "30d", "2 Ay": "2mo", "1 Yıl": "1y", "3 Yıl": "3y"}
@@ -443,20 +483,23 @@ if time_period_unit == "Tarih Aralığı":
         period_candles = int(days_diff * interval_factor)
         time_period = f"{start_date.strftime('%d.%m.%Y')} → {end_date.strftime('%d.%m.%Y')}"
 else:
-    time_period_value = st.sidebar.number_input("Geçmiş Test Süresi Değeri", min_value=1, max_value=100, value=1, step=1, key="period_val")
+    time_period_value = st.sidebar.number_input("Geçmiş Test Süresi Değeri", min_value=1, max_value=100, value=2, step=1, key="period_val")
 
     unit_factor = {"Yıl": 365, "Ay": 30, "Hafta": 7, "Gün": 1, "Saat": 1/24}
     interval_factor = 24 if interval_label == "1 Saat" else 1
     period_candles = int(time_period_value * unit_factor[time_period_unit] * interval_factor)
     time_period = f"{time_period_value} {time_period_unit}"
 
-train_size = st.sidebar.slider("Yapay Zeka Eğitim Verisi Oranı (%)", 50, 90, 80)
-backtest_balance = st.sidebar.number_input("Backtest Başlangıç Bakiyesi ($)", min_value=100.0, value=10000.0, step=500.0)
-leverage = st.sidebar.number_input("Kaldıraç (x)", min_value=1, max_value=125, value=1, step=1)
+train_size = st.sidebar.slider("Yapay Zeka Eğitim Verisi Oranı (%)", 50, 90, 90)
+backtest_balance = st.sidebar.number_input("İşlem Giriş Bakiyesi ($) (pozisyon temeli)", min_value=100.0, value=1000.0, step=100.0)
+leverage = st.sidebar.number_input("Kaldıraç (x)", min_value=1, max_value=125, value=10, step=1)
+total_cash_manual = st.sidebar.number_input("💰 Toplam Kasa / Backtest Sermayesi ($)", min_value=100.0, value=20000.0, step=500.0)
 
 st.sidebar.markdown("---")
 st.sidebar.header("🚨 3. Alarm Oluşturma")
 alarm_init_balance = st.sidebar.number_input("Bu Alarma Özel Başlangıç Bakiyesi ($)", min_value=10.0, value=1000.0, step=100.0)
+_total_alarm_cash = sum(a.get("balance", 0.0) for a in st.session_state.alarms)
+st.sidebar.metric("💰 Toplam Kasa (Tüm Alarmlar)", f"${_total_alarm_cash:,.2f}")
 
 all_crypto_options = crypto_list + st.session_state.custom_cryptos
 multi_tickers = st.sidebar.multiselect(
@@ -506,8 +549,7 @@ if st.sidebar.button("🚨 SEÇİLEN COİNLERİ ALARMLARA EKLE", width="stretch"
 tab1, tab2, tab3 = st.tabs(["📊 1. Gelişmiş Backtest Alanı", "🚨 2. Canlı Alarm Havuzu & Excel", "🕒 3. Global İşlem Günlüğü"])
 
 raw_df = get_crypto_data(ticker, period_candles, interval_mapping[interval_label])
-processed_df, total_net_return_pct, final_wallet_value, backtest_logs, latest_signal = compute_strategy_performance(raw_df, train_size, backtest_balance, leverage=leverage)
-process_live_alarms(bot_token, chat_id, leverage=leverage)
+processed_df, total_net_return_pct, final_wallet_value, backtest_logs, latest_signal = compute_strategy_performance(raw_df, train_size, total_cash_manual, leverage=leverage, trade_margin=backtest_balance)
 
 st.sidebar.markdown("---")
 st.sidebar.header("📈 4. Gerçek Zamanlı İşlem")
@@ -525,7 +567,7 @@ with tab1:
 
         col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
-            st.metric("Başlangıç Bakiyesi", f"${backtest_balance:,.2f}")
+            st.metric("💰 Toplam Kasa (Başlangıç)", f"${total_cash_manual:,.2f}")
         with col2:
             st.metric("Son Kasa", f"${final_wallet_value:,.2f}")
         with col3:
@@ -614,11 +656,13 @@ with tab1:
             with c4:
                 st.metric("🤖 Eğitim Oranı", f"%{train_size}")
             with c5:
-                st.metric("💵 Başlangıç", f"${backtest_balance:,.0f}")
+                st.metric("💵 Toplam Kasa", f"${total_cash_manual:,.0f}")
             with c6:
                 st.metric("⚡ Kaldıraç", f"{leverage}x")
 
             def trade_color(row):
+                if row['Sonuç'] == '💥 Likide':
+                    return ['background-color: #ffebee'] * len(row)
                 if row['Sonuç'] == '✅ Başarılı':
                     return ['background-color: #e8f5e9'] * len(row)
                 elif row['Sonuç'] == '❌ Başarısız':
@@ -674,7 +718,12 @@ with tab2:
             _save_alarm_config(_cfg)
 
         active_count = sum(1 for a in st.session_state.alarms if a["is_active"])
-        st.markdown(f"**📊 {active_count} / {len(st.session_state.alarms)} aktif alarm**")
+        total_alarm_cash = sum(a.get("balance", 0.0) for a in st.session_state.alarms)
+        m1, m2 = st.columns(2)
+        with m1:
+            st.metric("💰 Toplam Kasa (Alarmlar)", f"${total_alarm_cash:,.2f}")
+        with m2:
+            st.metric("📊 Aktif Alarm", f"{active_count} / {len(st.session_state.alarms)}")
 
         if bot_token and chat_id and len(st.session_state.alarms) > 0:
             st.info("💡 Not: Alarm sinyalleri Telegram üzerinden gönderilecek.")
