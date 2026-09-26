@@ -273,11 +273,19 @@ def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_
 def load_ohlcv_5m(symbol_name, safe_limit):
     return get_crypto_data(symbol_name, safe_limit, "5m")
 
-def compute_5m_open_strategy(df_5m, init_cash=10000.0, leverage=1, trade_margin=None, doji_threshold=0.10):
+def compute_5m_open_strategy(df_5m, init_cash=10000.0, leverage=1, trade_margin=None, doji_threshold=0.10, stop_mode="base", stop_mult=3.0, atr_frac=0.30):
     try:
         if df_5m is None or df_5m.empty or len(df_5m) < 30:
             return None, 0.0, init_cash, pd.DataFrame(), 0
         working_df = df_5m.copy()
+
+        atr14 = None
+        if stop_mode == "atr":
+            dd = working_df.resample("1D").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
+            prev_c = dd["Close"].shift(1)
+            tr = pd.concat([dd["High"] - dd["Low"], (dd["High"] - prev_c).abs(), (dd["Low"] - prev_c).abs()], axis=1).max(axis=1)
+            atr14 = tr.rolling(14).mean().shift(1)
+
         trade_logs = []
         cash = init_cash
         margin_size = float(trade_margin) if trade_margin and trade_margin > 0 else cash
@@ -285,7 +293,7 @@ def compute_5m_open_strategy(df_5m, init_cash=10000.0, leverage=1, trade_margin=
         fee2 = 0.9998 * 0.9998
 
         day_groups = working_df.groupby(working_df.index.normalize())
-        for _, day_df in day_groups:
+        for day_key, day_df in day_groups:
             if len(day_df) < 2:
                 continue
             first = day_df.iloc[0]
@@ -308,7 +316,17 @@ def compute_5m_open_strategy(df_5m, init_cash=10000.0, leverage=1, trade_margin=
             ent_price = float(entry_row['Open'])
             if ent_price <= 0:
                 continue
-            stop = f_low if direction == 1 else f_high
+            if stop_mode == "atr":
+                a_val = atr14.get(day_key, np.nan) if atr14 is not None else np.nan
+                if pd.isna(a_val) or a_val <= 0:
+                    continue
+                sd = atr_frac * float(a_val)
+                stop = ent_price - sd if direction == 1 else ent_price + sd
+            elif stop_mode == "mult":
+                d0 = ent_price - f_low if direction == 1 else f_high - ent_price
+                stop = ent_price - stop_mult * d0 if direction == 1 else ent_price + stop_mult * d0
+            else:
+                stop = f_low if direction == 1 else f_high
             ent_date = entry_row.name
 
             if cash <= 0.01 or margin_size <= 0.01:
@@ -620,7 +638,20 @@ if USE_5M_STRATEGY:
         "Doji Eşiği (|Gövde| / Aralık < bu değerse işlem yok)",
         min_value=0.0, max_value=0.5, value=0.10, step=0.05, key="doji_k"
     )
-    st.sidebar.info("ℹ️ 5M stratejisi: Günün ilk 5 dk mumu yönü → 2. mumda giriş, stop ilk mumun karşı ucu, çıkış gün sonu. Eğitim oranı ve model ayarları bu modda kullanılmaz.")
+    stop_mode_ui = st.sidebar.selectbox(
+        "Stop Yöntemi",
+        ["İlk Mumun Karşı Ucu", "Stop Çarpanı (x)", "ATR (14g, %)"],
+        key="stop_mode_k"
+    )
+    STOP_MODE_MAP = {"İlk Mumun Karşı Ucu": "base", "Stop Çarpanı (x)": "mult", "ATR (14g, %)": "atr"}
+    stop_mode_param = STOP_MODE_MAP[stop_mode_ui]
+    stop_mult_ui = 3.0
+    atr_frac_ui = 0.30
+    if stop_mode_param == "mult":
+        stop_mult_ui = st.sidebar.number_input("Stop Çarpanı (x)", min_value=1.0, max_value=5.0, value=3.0, step=0.1, key="stop_mult_k")
+    elif stop_mode_param == "atr":
+        atr_frac_ui = st.sidebar.number_input("ATR Yüzdesi (%)", min_value=5.0, max_value=50.0, value=30.0, step=5.0, key="atr_pct_k") / 100.0
+    st.sidebar.info("ℹ️ 5M stratejisi: Günün ilk 5 dk mumu yönü → 2. mumda giriş, stop seçili yöntemle, çıkış gün sonu. Eğitim oranı ve model ayarları bu modda kullanılmaz.")
 
 interval_mapping = {"1 Saat": "1h", "1 Gün": "1d"}
 period_mapping = {"7 Gün": "7d", "30 Gün": "30d", "2 Ay": "2mo", "1 Yıl": "1y", "3 Yıl": "3y"}
@@ -742,7 +773,8 @@ if USE_5M_STRATEGY:
     days_count = max(period_candles // (24 if interval_label == "1 Saat" else 1), 1)
     df_5m = load_ohlcv_5m(ticker, min(days_count * 288, 50000))
     processed_df, total_net_return_pct, final_wallet_value, backtest_logs, latest_signal = compute_5m_open_strategy(
-        df_5m, total_cash_manual, leverage=leverage, trade_margin=backtest_balance, doji_threshold=float(doji_threshold_ui)
+        df_5m, total_cash_manual, leverage=leverage, trade_margin=backtest_balance, doji_threshold=float(doji_threshold_ui),
+        stop_mode=stop_mode_param, stop_mult=float(stop_mult_ui), atr_frac=float(atr_frac_ui)
     )
 else:
     processed_df, total_net_return_pct, final_wallet_value, backtest_logs, latest_signal = compute_strategy_performance(raw_df, train_size, total_cash_manual, walk_forward=walk_forward, leverage=leverage, trade_margin=backtest_balance, n_estimators=int(n_estimators_ui), max_depth=int(max_depth_ui), min_samples_leaf=int(min_leaf_ui))
@@ -795,7 +827,7 @@ with tab1:
 2. Gövde / Aralık **{doji_threshold_ui:.2f}** eşiğinin altındaysa → **DOJI, işlem yok**
 3. Gövde pozitifse → 2. mumun açılışında **LONG**; negatifse → 2. mumun açılışında **SHORT**
 
-**Stop:** İlk mumun karşı ucu (LONG'da ilk mumun dibi, SHORT'ta ilk mumun tavanı).
+**Stop ({stop_mode_ui}):** {"İlk mumun karşı ucu (LONG'da dip, SHORT'ta tavan)" if stop_mode_param == "base" else (f"Girişe göre mesafe × {stop_mult_ui:.1f}" if stop_mode_param == "mult" else f"14 günlük ATR × %{atr_frac_ui*100:.0f}")}
 
 **Çıkış:** Aynı günün son 5 dk mumunun kapanışı (gün sonu).
 
