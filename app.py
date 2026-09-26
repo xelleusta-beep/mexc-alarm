@@ -88,7 +88,7 @@ def get_crypto_data(symbol_name, safe_limit, inv_str):
         return pd.DataFrame()
 
 # --- 3. PANDAS BACKTEST MATEMATİK MOTORU (Walk-Forward) ---
-def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_forward=True, leverage=1, trade_margin=None):
+def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_forward=True, leverage=1, trade_margin=None, n_estimators=200, max_depth=10, min_samples_leaf=5, min_samples_split=10):
     try:
         from sklearn.ensemble import RandomForestClassifier
         working_df = df_input.copy()
@@ -130,9 +130,9 @@ def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_
                 if test_start >= len(X):
                     break
                 model = RandomForestClassifier(
-                    random_state=42, n_estimators=200,
-                    max_depth=10, min_samples_split=10,
-                    min_samples_leaf=5, class_weight='balanced',
+                    random_state=42, n_estimators=n_estimators,
+                    max_depth=max_depth if max_depth and max_depth > 0 else None, min_samples_split=min_samples_split,
+                    min_samples_leaf=min_samples_leaf, class_weight='balanced',
                     n_jobs=-1
                 )
                 model.fit(X[:train_end], y[:train_end])
@@ -146,9 +146,9 @@ def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_
             if split_idx == 0 or split_idx >= len(X):
                 split_idx = int(len(X) * 0.8)
             model = RandomForestClassifier(
-                random_state=42, n_estimators=200,
-                max_depth=10, min_samples_split=10,
-                min_samples_leaf=5, class_weight='balanced',
+                random_state=42, n_estimators=n_estimators,
+                max_depth=max_depth if max_depth and max_depth > 0 else None, min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf, class_weight='balanced',
                 n_jobs=-1
             )
             model.fit(X[:split_idx], y[:split_idx])
@@ -267,6 +267,153 @@ def compute_strategy_performance(df_input, train_ratio, init_cash=10000.0, walk_
         return working_df, total_ret_pct, final_val, pd.DataFrame(trade_logs), latest_signal_out
     except Exception as e:
         st.error(f"Hesaplama hatası: {str(e)}")
+        return None, 0.0, init_cash, pd.DataFrame(), 0
+
+@st.cache_data(ttl=600, show_spinner="5 dakikalık mumlar çekiliyor...")
+def load_ohlcv_5m(symbol_name, safe_limit):
+    return get_crypto_data(symbol_name, safe_limit, "5m")
+
+def compute_5m_open_strategy(df_5m, init_cash=10000.0, leverage=1, trade_margin=None, doji_threshold=0.10):
+    try:
+        if df_5m is None or df_5m.empty or len(df_5m) < 30:
+            return None, 0.0, init_cash, pd.DataFrame(), 0
+        working_df = df_5m.copy()
+        trade_logs = []
+        cash = init_cash
+        margin_size = float(trade_margin) if trade_margin and trade_margin > 0 else cash
+        latest_signal = 0
+        fee2 = 0.9998 * 0.9998
+
+        day_groups = working_df.groupby(working_df.index.normalize())
+        for _, day_df in day_groups:
+            if len(day_df) < 2:
+                continue
+            first = day_df.iloc[0]
+            f_open = float(first['Open'])
+            f_high = float(first['High'])
+            f_low = float(first['Low'])
+            f_close = float(first['Close'])
+            f_range = f_high - f_low
+            if f_range <= 0:
+                latest_signal = 0
+                continue
+            body = f_close - f_open
+            if abs(body) / f_range < doji_threshold:
+                latest_signal = 0
+                continue
+            direction = 1 if body > 0 else -1
+            latest_signal = direction
+
+            entry_row = day_df.iloc[1]
+            ent_price = float(entry_row['Open'])
+            if ent_price <= 0:
+                continue
+            stop = f_low if direction == 1 else f_high
+            ent_date = entry_row.name
+
+            if cash <= 0.01 or margin_size <= 0.01:
+                continue
+
+            trade_cash_in = min(margin_size, cash)
+            cash_at_entry = cash
+            liq_drop = cash_at_entry / (trade_cash_in * leverage) if leverage > 0 else 2.0
+            if liq_drop < 1.0:
+                liq_price = ent_price * (1.0 - liq_drop) if direction == 1 else ent_price * (1.0 + liq_drop)
+            else:
+                liq_price = None
+
+            exit_price = None
+            exit_date = None
+            is_liq = False
+            is_stop = False
+            adverse = ent_price
+
+            for ts, row in day_df.iloc[1:].iterrows():
+                r_open = float(row['Open'])
+                r_high = float(row['High'])
+                r_low = float(row['Low'])
+                if direction == 1:
+                    adverse = min(adverse, r_low)
+                    first_hit = stop
+                    hit_liq = False
+                    if liq_price is not None and liq_price > stop:
+                        first_hit = liq_price
+                        hit_liq = True
+                    if r_low <= first_hit:
+                        exit_price = min(first_hit, r_open)
+                        exit_date = ts
+                        is_liq = hit_liq
+                        is_stop = not hit_liq
+                        break
+                else:
+                    adverse = max(adverse, r_high)
+                    first_hit = stop
+                    hit_liq = False
+                    if liq_price is not None and liq_price < stop:
+                        first_hit = liq_price
+                        hit_liq = True
+                    if r_high >= first_hit:
+                        exit_price = max(first_hit, r_open)
+                        exit_date = ts
+                        is_liq = hit_liq
+                        is_stop = not hit_liq
+                        break
+
+            if exit_price is None:
+                last_row = day_df.iloc[-1]
+                exit_price = float(last_row['Close'])
+                exit_date = last_row.name
+
+            ratio = exit_price / ent_price
+            if direction == 1:
+                pnl_raw = trade_cash_in * fee2 * ratio - trade_cash_in
+            else:
+                pnl_raw = trade_cash_in * fee2 * (2.0 - ratio) - trade_cash_in
+            pnl = pnl_raw * leverage
+
+            if is_liq:
+                cash = 0.0
+                margin_size = 0.0
+                pnl = -cash_at_entry
+                cash_after = 0.0
+            else:
+                cash = max(cash_at_entry + pnl, 0.0)
+                margin_size = max(margin_size + pnl, 0.0)
+                cash_after = cash
+
+            ret_pct = direction * (ratio - 1.0) * 100.0
+            dd_pct = direction * (adverse - ent_price) / ent_price * 100.0
+            dd_lev_pct = dd_pct * leverage
+            dd_usd = (dd_pct / 100.0) * trade_cash_in * leverage
+
+            if is_liq:
+                yon = "🟢 LONG → 💥 LİQ" if direction == 1 else "🔴 SHORT → 💥 LİQ"
+            elif is_stop:
+                yon = "🟢 LONG → ⏹️ STOP" if direction == 1 else "🔴 SHORT → ⏹️ STOP"
+            else:
+                yon = "🟢 LONG → 🔴 GÜN SONU" if direction == 1 else "🔴 SHORT → 🟢 GÜN SONU"
+
+            trade_logs.append({
+                "İşlem ID": len(trade_logs) + 1,
+                "Yön": yon,
+                "Giriş Tarihi": ent_date.strftime('%Y-%m-%d %H:%M'),
+                "Çıkış Tarihi": exit_date.strftime('%Y-%m-%d %H:%M'),
+                "Giriş Fiyatı ($)": round(ent_price, 4),
+                "Çıkış Fiyatı ($)": round(exit_price, 4),
+                "Toplam Kasa ($)": round(cash_after, 2),
+                "Miktar ($)": f"+${trade_cash_in:.2f}",
+                "Net Kâr/Zarar ($)": round(pnl, 2),
+                "Getiri (%)": f"{ret_pct * leverage:.2f}%",
+                "Max Düşüş (%)": f"{dd_pct:.2f}%",
+                "Max Düşüş (Kaldıraçlı %)": f"{dd_lev_pct:.2f}%",
+                "Max Düşüş ($)": round(dd_usd, 2),
+                "Sonuç": "💥 Likide" if is_liq else ("✅ Başarılı" if ret_pct > 0 else "❌ Başarısız")
+            })
+
+        total_ret_pct = ((cash - init_cash) / init_cash) * 100
+        return None, total_ret_pct, cash, pd.DataFrame(trade_logs), latest_signal
+    except Exception as e:
+        st.error(f"5M strateji hatası: {str(e)}")
         return None, 0.0, init_cash, pd.DataFrame(), 0
 
 # --- 4. GRAFİK OLUŞTURMA FONKSİYONU ---
@@ -429,7 +576,7 @@ crypto_list = [
 if "custom_cryptos" not in st.session_state:
     st.session_state.custom_cryptos = []
 
-ticker = st.sidebar.selectbox("Kripto Para Seçin (MEXC Canlı)", crypto_list + st.session_state.custom_cryptos)
+ticker = st.sidebar.selectbox("Kripto Para Seçin (MEXC Canlı)", crypto_list + st.session_state.custom_cryptos, key="ticker_k")
 
 st.sidebar.markdown("**➕ Özel Kripto Ekle**")
 custom_input = st.sidebar.text_input("Parite Girin (örn: PEPE/USDT)", key="custom_crypto")
@@ -461,6 +608,20 @@ if custom_input:
 
 interval_label = st.sidebar.selectbox("Veri Sıklığı (Grafik Mum Tipi)", ["1 Saat", "1 Gün"], index=1)
 
+strategy_mode = st.sidebar.selectbox(
+    "Backtest Stratejisi",
+    ["🤖 ML RandomForest (Momentum)", "⏱️ 5M Açılış Mumu (Long/Short)"],
+    key="strategy_mode_k"
+)
+USE_5M_STRATEGY = strategy_mode.startswith("⏱️")
+
+if USE_5M_STRATEGY:
+    doji_threshold_ui = st.sidebar.number_input(
+        "Doji Eşiği (|Gövde| / Aralık < bu değerse işlem yok)",
+        min_value=0.0, max_value=0.5, value=0.10, step=0.05, key="doji_k"
+    )
+    st.sidebar.info("ℹ️ 5M stratejisi: Günün ilk 5 dk mumu yönü → 2. mumda giriş, stop ilk mumun karşı ucu, çıkış gün sonu. Eğitim oranı ve model ayarları bu modda kullanılmaz.")
+
 interval_mapping = {"1 Saat": "1h", "1 Gün": "1d"}
 period_mapping = {"7 Gün": "7d", "30 Gün": "30d", "2 Ay": "2mo", "1 Yıl": "1y", "3 Yıl": "3y"}
 
@@ -490,10 +651,38 @@ else:
     period_candles = int(time_period_value * unit_factor[time_period_unit] * interval_factor)
     time_period = f"{time_period_value} {time_period_unit}"
 
-train_size = st.sidebar.slider("Yapay Zeka Eğitim Verisi Oranı (%)", 50, 90, 90)
-backtest_balance = st.sidebar.number_input("İşlem Giriş Bakiyesi ($) (pozisyon temeli)", min_value=100.0, value=1000.0, step=100.0)
-leverage = st.sidebar.number_input("Kaldıraç (x)", min_value=1, max_value=125, value=10, step=1)
-total_cash_manual = st.sidebar.number_input("💰 Toplam Kasa / Backtest Sermayesi ($)", min_value=100.0, value=20000.0, step=500.0)
+train_size = st.sidebar.slider("Yapay Zeka Eğitim Verisi Oranı (%)", 50, 90, 90, key="train_size_k")
+backtest_balance = st.sidebar.number_input("İşlem Giriş Bakiyesi ($) (pozisyon temeli)", min_value=100.0, value=1000.0, step=100.0, key="tbalance_k")
+leverage = st.sidebar.number_input("Kaldıraç (x)", min_value=1, max_value=125, value=10, step=1, key="lev_k")
+total_cash_manual = st.sidebar.number_input("💰 Toplam Kasa / Backtest Sermayesi ($)", min_value=100.0, value=20000.0, step=500.0, key="tcash_k")
+
+st.sidebar.markdown("**🤖 Model Ayarları**")
+
+def _preset_btc():
+    st.session_state.wf_k = True
+    st.session_state.nest_k = 400
+    st.session_state.mdepth_k = 0
+    st.session_state.mleaf_k = 1
+    st.session_state.tbalance_k = 20000.0
+    st.session_state.lev_k = 1
+
+def _preset_eth():
+    st.session_state.wf_k = False
+    st.session_state.nest_k = 200
+    st.session_state.mdepth_k = 0
+    st.session_state.mleaf_k = 5
+    st.session_state.tbalance_k = 20000.0
+    st.session_state.lev_k = 1
+
+st.sidebar.markdown("**⚡ Hazır Ayarlar**")
+c_p1, c_p2 = st.sidebar.columns(2)
+c_p1.button("BTC En İyi", width="stretch", on_click=_preset_btc)
+c_p2.button("ETH En İyi", width="stretch", on_click=_preset_eth)
+
+walk_forward = st.sidebar.checkbox("Walk-Forward (oversampling koruması)", value=True, key="wf_k")
+n_estimators_ui = st.sidebar.number_input("Ağaç Sayısı (n_estimators)", min_value=50, max_value=1000, value=200, step=50, key="nest_k")
+max_depth_ui = st.sidebar.number_input("Maks Derinlik (0 = sınırsız)", min_value=0, max_value=50, value=10, step=1, key="mdepth_k")
+min_leaf_ui = st.sidebar.number_input("Min Yaprak (min_samples_leaf)", min_value=1, max_value=50, value=5, step=1, key="mleaf_k")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🚨 3. Alarm Oluşturma")
@@ -549,7 +738,14 @@ if st.sidebar.button("🚨 SEÇİLEN COİNLERİ ALARMLARA EKLE", width="stretch"
 tab1, tab2, tab3 = st.tabs(["📊 1. Gelişmiş Backtest Alanı", "🚨 2. Canlı Alarm Havuzu & Excel", "🕒 3. Global İşlem Günlüğü"])
 
 raw_df = get_crypto_data(ticker, period_candles, interval_mapping[interval_label])
-processed_df, total_net_return_pct, final_wallet_value, backtest_logs, latest_signal = compute_strategy_performance(raw_df, train_size, total_cash_manual, leverage=leverage, trade_margin=backtest_balance)
+if USE_5M_STRATEGY:
+    days_count = max(period_candles // (24 if interval_label == "1 Saat" else 1), 1)
+    df_5m = load_ohlcv_5m(ticker, min(days_count * 288, 50000))
+    processed_df, total_net_return_pct, final_wallet_value, backtest_logs, latest_signal = compute_5m_open_strategy(
+        df_5m, total_cash_manual, leverage=leverage, trade_margin=backtest_balance, doji_threshold=float(doji_threshold_ui)
+    )
+else:
+    processed_df, total_net_return_pct, final_wallet_value, backtest_logs, latest_signal = compute_strategy_performance(raw_df, train_size, total_cash_manual, walk_forward=walk_forward, leverage=leverage, trade_margin=backtest_balance, n_estimators=int(n_estimators_ui), max_depth=int(max_depth_ui), min_samples_leaf=int(min_leaf_ui))
 
 st.sidebar.markdown("---")
 st.sidebar.header("📈 4. Gerçek Zamanlı İşlem")
@@ -573,7 +769,11 @@ with tab1:
         with col3:
             st.metric("Net Getiri", f"{total_net_return_pct:+.2f}%", delta=f"{total_net_return_pct:+.2f}%")
         with col4:
-            st.metric("Son Sinyal", "ALIM" if latest_signal == 1 else "SATIM")
+            if USE_5M_STRATEGY:
+                signal_text = {1: "🟢 LONG", -1: "🔴 SHORT", 0: "⏳ YOK"}.get(latest_signal, "⏳ YOK")
+            else:
+                signal_text = "ALIM" if latest_signal == 1 else "SATIM"
+            st.metric("Son Sinyal", signal_text)
         with col5:
             st.metric("Son Test Tarihi", raw_df.index[-1].strftime('%Y-%m-%d') if not raw_df.empty else "N/A")
 
@@ -585,8 +785,27 @@ with tab1:
 
         st.markdown("---")
 
-        with st.expander("ℹ️ Strateji Şartları ve ML Mantığı", expanded=False):
-            st.markdown(f"""
+        if USE_5M_STRATEGY:
+            with st.expander("ℹ️ Strateji Şartları — 5M Açılış Mumu", expanded=False):
+                st.markdown(f"""
+**Yön:** **LONG ve SHORT** — iki yönlü işlem.
+
+**Mantık (prediksiyon yok, kural tabanlı):**
+1. Her günün **ilk 5 dk mumu** alınır → gövde = |Kapanış - Açılış|, aralık = Yüksek - Düşük
+2. Gövde / Aralık **{doji_threshold_ui:.2f}** eşiğinin altındaysa → **DOJI, işlem yok**
+3. Gövde pozitifse → 2. mumun açılışında **LONG**; negatifse → 2. mumun açılışında **SHORT**
+
+**Stop:** İlk mumun karşı ucu (LONG'da ilk mumun dibi, SHORT'ta ilk mumun tavanı).
+
+**Çıkış:** Aynı günün son 5 dk mumunun kapanışı (gün sonu).
+
+**Risk:** Kaldıraç, likidasyon ve compounding (kâr sonraki işleme eklenir) ML moduyla aynı matematik motorunu kullanır.
+
+**Doji Eşiği:** {doji_threshold_ui:.2f} — eşik düşerse daha fazla işlem, yükselirse daha seçici.
+                """)
+        else:
+            with st.expander("ℹ️ Strateji Şartları ve ML Mantığı", expanded=False):
+                st.markdown(f"""
 **Yön:** Sadece **LONG (Alım)** — short/satış yönü yok.
 
 **ML Modeli:** RandomForestClassifier ({train_size}% eğitim / {100-train_size}% test)
@@ -609,7 +828,7 @@ with tab1:
 **Zamanlama:** Sinyaller ve canlı alarmlar **yalnızca mum kapandığında** değerlendirilir (1 Gün → 00:00 UTC, 1 Saat → saat başı). Kapanmam mumla işlem yapılmaz.
 
 **Sinyal Kaynağı:** RSI aşırı alım/satım bölgeleri, fiyat-SMA ilişkisi ve getiri momentumu birleştirilerek RandomForest ile sınıflandırma yapılır.
-            """)
+                """)
 
         st.markdown("---")
 
@@ -654,7 +873,7 @@ with tab1:
             with c3:
                 st.metric("📅 Mum Tipi", interval_label)
             with c4:
-                st.metric("🤖 Eğitim Oranı", f"%{train_size}")
+                st.metric("🤖 Eğitim Oranı", f"%{train_size}" if not USE_5M_STRATEGY else "—")
             with c5:
                 st.metric("💵 Toplam Kasa", f"${total_cash_manual:,.0f}")
             with c6:

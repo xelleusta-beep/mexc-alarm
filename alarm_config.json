@@ -1,7 +1,7 @@
 {
   "telegram_bot_token": "",
   "telegram_chat_id": "",
-  "leverage": 10,
+  "leverage": 1,
   "train_ratio": 90,
   "check_interval_sec": 30,
   "alarms": [
